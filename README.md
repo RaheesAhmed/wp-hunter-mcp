@@ -370,13 +370,6 @@ Checks installed plugins against CVE database.
 
 **Returns**: Vulnerable plugins, CVE IDs, vulnerability types, version comparisons
 
-**Known CVEs in Database (2024-2026)**:
-- WooCommerce: CVE-2024-5301 (SQL Injection), CVE-2024-2897 (XSS)
-- Elementor: CVE-2024-6979 (File Upload), CVE-2024-1234 (RCE)
-- WPForms: CVE-2024-3456 (SQL Injection)
-- Yoast SEO: CVE-2024-7890 (Information Disclosure)
-- Wordfence: CVE-2024-4321 (Bypass)
-- And 50+ more...
 
 ---
 
